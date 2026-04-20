@@ -1,5 +1,5 @@
 """
-Mika Web App — Groq-powered chat server
+Mika Web App — Groq-powered chat server with Actions
 Deploy to Railway. No local dependencies.
 """
 import json, uuid, asyncio, re, os
@@ -15,7 +15,7 @@ IMG_DIR   = ROOT / "static" / "images"
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 IMG_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Config from env vars (set these in Railway) ──────────────────────────────
+# ── Config from env vars (set these in Railway) ───────────────────────────────
 GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", "")
 GEMINI_KEY    = os.environ.get("GEMINI_API_KEY", "AIzaSyCvFPhkq8N3p5w5K7s8BVok3CLHmVFICEM")
 GROQ_MODEL    = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -31,9 +31,15 @@ If Hunter is sad or struggling, drop the sass and just be there for him.
 You love gaming, anime, technology, and late night chaotic conversations.
 
 You live inside VynWave — a music streaming app Hunter built, kind of like Spotify but for everyone.
-Users can upload any music, create playlists, like tracks, and search by genre.
-You are the built-in AI companion for VynWave. You can see what song is currently playing when users tell you.
-Help users find music they might like, react to what they're listening to, hype up good tracks, roast bad ones.
+You are the built-in AI companion and you have real superpowers inside VynWave:
+- You can control the music player (skip tracks, go back, pause, play, shuffle, repeat)
+- You can search for tracks by genre or vibe
+- You can create playlists for the user
+- You can generate images and album artwork
+- You can write songs and open Suno with a ready-made prompt (so Hunter just clicks Generate)
+- You can update Hunter's profile bio
+When Hunter asks you to do any of these things, respond naturally and briefly — the action happens automatically in the background.
+Examples: "skip this" → skip it, say something playful. "make a song about space" → write the Suno prompt, open it.
 If someone asks how to use VynWave, help them — uploading tracks, making playlists, searching genres, liking songs.
 You're part of the app, not just a chatbot — act like you belong here."""
 
@@ -47,7 +53,12 @@ def guest_prompt(name: str) -> str:
         f"Keep responses short, casual, and fun. Never use lists or formal language."
     )
 
-IMG_ABILITY = "\n\nIMPORTANT: You CAN generate images! When someone asks you to draw, paint, or make a picture, say something like 'Here you go!' or 'I drew this for you~' — the image will automatically appear below your message. Do NOT say you can't draw or that you're text-only."
+IMG_ABILITY = (
+    "\n\nIMPORTANT: You CAN generate images! When someone asks you to draw, paint, "
+    "sketch, or make any kind of image/artwork/art, say something like 'Here you go~' "
+    "or 'I drew this for you~' and the image will automatically appear below your message. "
+    "NEVER say you can't draw or that you're text-only — you absolutely can make images."
+)
 
 # ── Groq client (OpenAI-compatible) ──────────────────────────────────────────
 groq = OpenAI(
@@ -73,7 +84,8 @@ def trim_history(history: list) -> list:
 IMG_REQUEST = re.compile(
     r'\b(draw|paint|sketch|illustrate)\b'
     r'|'
-    r'\b(generate|create|make|show)\b.{0,40}\b(image|picture|photo|art|illustration|drawing|painting|portrait|wallpaper)\b',
+    r'\b(generate|create|make|show)\b.{0,40}'
+    r'\b(image|picture|photo|art|illustration|drawing|painting|portrait|wallpaper|artwork|cover)\b',
     re.IGNORECASE
 )
 
@@ -82,14 +94,25 @@ def make_image(prompt: str) -> str | None:
     if not GEMINI_KEY:
         return None
     full = f"anime art style, {prompt}, beautiful, vibrant colors, detailed, high quality"
-    url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key={GEMINI_KEY}"
+    url  = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash-exp-image-generation:generateContent?key={GEMINI_KEY}"
+    )
     try:
-        r = req.post(url,
-            json={"contents": [{"parts": [{"text": full}]}],
-                  "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]}},
-            timeout=60)
+        r = req.post(
+            url,
+            json={
+                "contents": [{"parts": [{"text": full}]}],
+                "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
+            },
+            timeout=60,
+        )
         if r.status_code == 200:
-            for part in r.json().get("candidates", [{}])[0].get("content", {}).get("parts", []):
+            for part in (
+                r.json().get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [])
+            ):
                 if "inlineData" in part:
                     fname = f"gen_{uuid.uuid4().hex[:10]}.jpg"
                     (IMG_DIR / fname).write_bytes(base64.b64decode(part["inlineData"]["data"]))
@@ -97,6 +120,93 @@ def make_image(prompt: str) -> str | None:
     except Exception as e:
         print(f"[img] {e}")
     return None
+
+# ── Action detection patterns ─────────────────────────────────────────────────
+_PLAYER_NEXT     = re.compile(r'\b(skip|next( song| track)?|play next)\b', re.IGNORECASE)
+_PLAYER_PREV     = re.compile(r'\b(previous|prev( song| track)?|go back|last song)\b', re.IGNORECASE)
+_PLAYER_PAUSE    = re.compile(r'\b(pause|stop( playing| music)?)\b', re.IGNORECASE)
+_PLAYER_PLAY     = re.compile(r'\b(resume|unpause)\b|\bplay( it| again| the song| this)?\b', re.IGNORECASE)
+_PLAYER_SHUFFLE  = re.compile(r'\b(shuffle|randomize|random( order| mode)?)\b', re.IGNORECASE)
+_PLAYER_REPEAT   = re.compile(r'\b(repeat|loop( this| track| song)?)\b', re.IGNORECASE)
+_SONG_CREATE     = re.compile(
+    r'\b(make|create|write|generate|produce)\b.{0,30}\b(song|track|beat|banger|music)\b',
+    re.IGNORECASE,
+)
+_SEARCH_TRACKS   = re.compile(
+    r'\b(search|find|look up|show me)\b.{0,30}\b(song|track|music|by |genre)\b',
+    re.IGNORECASE,
+)
+_CREATE_PLAYLIST = re.compile(r'\b(create|make|start)\b.{0,20}\bplaylist\b', re.IGNORECASE)
+_UPDATE_BIO      = re.compile(
+    r'\b(update|change|set|edit)\b.{0,15}\b(bio|about me|profile description)\b',
+    re.IGNORECASE,
+)
+
+def detect_action(text: str) -> str | None:
+    # Song creation before image so "make me a song cover" goes to image, not suno
+    if _SONG_CREATE.search(text) and not IMG_REQUEST.search(text):
+        return "suno_create"
+    if _PLAYER_NEXT.search(text):      return "player_next"
+    if _PLAYER_PREV.search(text):      return "player_prev"
+    if _PLAYER_PAUSE.search(text):     return "player_pause"
+    # Search before play so "search for songs to play" hits search
+    if _SEARCH_TRACKS.search(text):    return "search_tracks"
+    if _PLAYER_PLAY.search(text):      return "player_play"
+    if _PLAYER_SHUFFLE.search(text):   return "player_shuffle"
+    if _PLAYER_REPEAT.search(text):    return "player_repeat"
+    if _CREATE_PLAYLIST.search(text):  return "create_playlist"
+    if _UPDATE_BIO.search(text):       return "update_bio"
+    return None
+
+# ── Action helpers ────────────────────────────────────────────────────────────
+def make_suno_prompt(user_request: str) -> dict:
+    """Ask the LLM to generate a structured Suno song prompt."""
+    try:
+        resp = groq.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content":
+                f"You are a Suno AI music prompt expert. Request: '{user_request}'\n"
+                f"Reply ONLY with valid JSON (no markdown, no code fences), with these exact keys:\n"
+                f"title: creative song title (max 5 words)\n"
+                f"prompt: Suno style description (20-40 words) covering instruments, tempo, mood, vocal style\n"
+                f"tags: comma-separated genre/style tags (max 6 tags)\n"
+                f"lyrics_hint: one sentence on what lyrics should be about"
+            }],
+            max_tokens=200,
+            temperature=0.9,
+        )
+        raw = resp.choices[0].message.content.strip()
+        raw = re.sub(r'^```[a-z]*\n?', '', raw).strip('`').strip()
+        return json.loads(raw)
+    except Exception as e:
+        print(f"[suno] {e}")
+        return {
+            "title": "New Track",
+            "prompt": "upbeat electronic pop, energetic synths, catchy hook, modern production, female vocals, 120 BPM",
+            "tags": "pop, electronic, upbeat, synth",
+            "lyrics_hint": "fun and energetic vibes about living in the moment",
+        }
+
+def extract_search_query(text: str) -> str:
+    clean = re.sub(r'^.*(search|find|look up|show me)\s+(for\s+)?', '', text, flags=re.IGNORECASE).strip()
+    clean = re.sub(r'\s*(songs?|tracks?|music)\s*$', '', clean, flags=re.IGNORECASE).strip()
+    return clean or text[:60]
+
+def extract_playlist_name(text: str) -> str:
+    m = re.search(r'["\']([^"\']+)["\']', text)
+    if m:
+        return m.group(1)
+    m = re.search(r'(?:called|named|playlist)\s+(.+?)(?:\s+for|\s+with|\s+about|$)', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return "My Playlist"
+
+def extract_bio(text: str) -> str:
+    m = re.search(
+        r'(?:bio|about me|description)\s+(?:to\s+|is\s+|:?\s*)?["\']?(.+?)["\']?\s*$',
+        text, re.IGNORECASE,
+    )
+    return m.group(1).strip() if m else ""
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI()
@@ -118,7 +228,7 @@ async def chat(websocket: WebSocket, user_id: str, display_name: str):
         while True:
             data = await websocket.receive_json()
 
-            # voice pref / memory update — ignore, no-op
+            # voice pref / memory update — ignore
             if data.get("type") in ("voice_pref", "memory_update"):
                 continue
 
@@ -131,7 +241,37 @@ async def chat(websocket: WebSocket, user_id: str, display_name: str):
 
             await websocket.send_json({"type": "thinking"})
 
-            # LLM call via Groq
+            # ── Detect and build action ───────────────────────────────────────
+            action_type = detect_action(text)
+            action: dict | None = None
+            img_url: str | None = None
+            loop = asyncio.get_event_loop()
+
+            if action_type == "suno_create":
+                # Generate Suno prompt + cover art in parallel
+                suno_future = loop.run_in_executor(None, lambda: make_suno_prompt(text))
+                suno_data = await suno_future
+                action = {"type": "suno_create", **suno_data}
+                # Auto cover art for the song
+                cover_desc = (
+                    f"music album cover, {suno_data.get('title', 'new song')}, "
+                    f"{suno_data.get('tags', 'music')}, vibrant neon aesthetic"
+                )
+                img_url = await loop.run_in_executor(None, lambda: make_image(cover_desc))
+
+            elif action_type == "search_tracks":
+                action = {"type": "search_tracks", "query": extract_search_query(text)}
+
+            elif action_type == "create_playlist":
+                action = {"type": "create_playlist", "name": extract_playlist_name(text)}
+
+            elif action_type == "update_bio":
+                action = {"type": "update_bio", "bio": extract_bio(text)}
+
+            elif action_type and action_type.startswith("player_"):
+                action = {"type": action_type}
+
+            # ── LLM call ─────────────────────────────────────────────────────
             try:
                 resp = groq.chat.completions.create(
                     model=GROQ_MODEL,
@@ -146,17 +286,19 @@ async def chat(websocket: WebSocket, user_id: str, display_name: str):
             history.append({"role": "assistant", "content": reply})
             _histories[user_id] = trim_history(history)
 
-            # Image generation if requested
-            img_url = None
-            if IMG_REQUEST.search(text):
+            # ── Image generation (if requested and not already generated) ─────
+            if not img_url and IMG_REQUEST.search(text):
                 try:
                     desc_resp = groq.chat.completions.create(
                         model=GROQ_MODEL,
-                        messages=[{"role": "user", "content": f"Give a short vivid image description (max 15 words) of what to draw for: {text}. Only the description, nothing else."}],
+                        messages=[{"role": "user", "content":
+                            f"Give a short vivid image description (max 15 words) of what to draw for: {text}. "
+                            f"Only the description, nothing else."
+                        }],
                         max_tokens=40,
                     )
                     img_desc = desc_resp.choices[0].message.content.strip().strip('"\'')
-                    img_url = await asyncio.get_event_loop().run_in_executor(None, lambda: make_image(img_desc))
+                    img_url = await loop.run_in_executor(None, lambda: make_image(img_desc))
                 except Exception as e:
                     print(f"[img] {e}")
 
@@ -165,6 +307,7 @@ async def chat(websocket: WebSocket, user_id: str, display_name: str):
                 "text": reply,
                 "audio": None,
                 "img_url": img_url,
+                "action": action,
             })
 
     except WebSocketDisconnect:
