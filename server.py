@@ -91,55 +91,14 @@ IMG_REQUEST = re.compile(
     re.IGNORECASE
 )
 
-_GEMINI_IMG_MODELS = [
-    "gemini-2.0-flash-preview-image-generation",
-    "gemini-2.0-flash-exp-image-generation",
-    "gemini-2.0-flash-thinking-exp:generateContent",  # fallback
-]
-
 def make_image(prompt: str) -> str | None:
-    import base64, requests as req
-    if not GEMINI_KEY:
-        print("[img] No Gemini key set")
-        return None
-    full = f"anime art style, {prompt}, beautiful, vibrant colors, detailed, high quality"
-    models = [
-        "gemini-2.0-flash-preview-image-generation",
-        "gemini-2.0-flash-exp-image-generation",
-    ]
-    for model in models:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model}:generateContent?key={GEMINI_KEY}"
-        )
-        try:
-            r = req.post(
-                url,
-                json={
-                    "contents": [{"parts": [{"text": full}]}],
-                    "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
-                },
-                timeout=60,
-            )
-            print(f"[img] {model} → {r.status_code}")
-            if r.status_code == 200:
-                for part in (
-                    r.json().get("candidates", [{}])[0]
-                    .get("content", {})
-                    .get("parts", [])
-                ):
-                    if "inlineData" in part:
-                        fname = f"gen_{uuid.uuid4().hex[:10]}.jpg"
-                        (IMG_DIR / fname).write_bytes(
-                            base64.b64decode(part["inlineData"]["data"])
-                        )
-                        print(f"[img] saved {fname}")
-                        return f"/images/{fname}"
-            else:
-                print(f"[img] error body: {r.text[:300]}")
-        except Exception as e:
-            print(f"[img] {model} exception: {e}")
-    return None
+    """Return a Pollinations.ai image URL — free, no API key, instant."""
+    import urllib.parse
+    full = f"anime art style, {prompt}, vibrant colors, detailed, high quality, no text"
+    encoded = urllib.parse.quote(full)
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&seed={uuid.uuid4().int % 99999}"
+    print(f"[img] pollinations url generated")
+    return url
 
 # ── Action detection patterns ─────────────────────────────────────────────────
 _PLAYER_NEXT     = re.compile(r'\b(skip|next( song| track)?|play next)\b', re.IGNORECASE)
@@ -262,46 +221,86 @@ async def chat(websocket: WebSocket, user_id: str, display_name: str):
             await websocket.send_json({"type": "thinking"})
 
             # ── Detect and build action ───────────────────────────────────────
+            import random
             action_type = detect_action(text)
             action: dict | None = None
             img_url: str | None = None
             loop = asyncio.get_event_loop()
+            reply: str | None = None  # set early for action shortcuts
 
             if action_type == "suno_create":
-                # Generate Suno prompt + cover art in parallel
                 suno_future = loop.run_in_executor(None, lambda: make_suno_prompt(text))
                 suno_data = await suno_future
                 action = {"type": "suno_create", **suno_data}
-                # Auto cover art for the song
                 cover_desc = (
                     f"music album cover, {suno_data.get('title', 'new song')}, "
                     f"{suno_data.get('tags', 'music')}, vibrant neon aesthetic"
                 )
                 img_url = await loop.run_in_executor(None, lambda: make_image(cover_desc))
+                # Short hardcoded reply — don't let LLM write lyrics
+                reply = random.choice([
+                    "wrote you something~ check the card below 🎵",
+                    "ooh this one's gonna slap~ hit Generate in Suno and let it cook 🔥",
+                    "card's ready~ just click Open in Suno and smash Generate~",
+                    "i cooked up a whole prompt for you~ go make it real!",
+                    "done~ the card has everything, just open Suno and go~",
+                ])
 
             elif action_type == "search_tracks":
                 action = {"type": "search_tracks", "query": extract_search_query(text)}
+                reply = random.choice([
+                    "looking it up~ here's what i found 👀",
+                    "ooh let me check what's on VynWave~",
+                    "found some tracks for you~",
+                ])
 
             elif action_type == "create_playlist":
                 action = {"type": "create_playlist", "name": extract_playlist_name(text)}
+                reply = random.choice([
+                    f"created \"{extract_playlist_name(text)}\" for you~ go fill it up!",
+                    f"playlist's ready~ \"{extract_playlist_name(text)}\" is waiting for tracks~",
+                ])
 
             elif action_type == "update_bio":
                 action = {"type": "update_bio", "bio": extract_bio(text)}
+                reply = "updated your bio~ looking good Hunter~" if extract_bio(text) else "hmm i couldn't catch the new bio, say it again?"
 
-            elif action_type and action_type.startswith("player_"):
-                action = {"type": action_type}
+            elif action_type == "player_next":
+                action = {"type": "player_next"}
+                reply = random.choice(["skipped~", "next one incoming~", "onto the next~", "bye bye that song lol"])
 
-            # ── LLM call ─────────────────────────────────────────────────────
-            try:
-                resp = groq.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=history,
-                    max_tokens=300,
-                    temperature=1.0,
-                )
-                reply = resp.choices[0].message.content.strip()
-            except Exception as e:
-                reply = f"*glitching out rn — {e}*"
+            elif action_type == "player_prev":
+                action = {"type": "player_prev"}
+                reply = random.choice(["going back~", "rewinding~", "ok ok going back~"])
+
+            elif action_type == "player_pause":
+                action = {"type": "player_pause"}
+                reply = random.choice(["paused~", "ok taking a break~", "pausing it~"])
+
+            elif action_type == "player_play":
+                action = {"type": "player_play"}
+                reply = random.choice(["playing~", "let's go~", "back to the music~"])
+
+            elif action_type == "player_shuffle":
+                action = {"type": "player_shuffle"}
+                reply = random.choice(["shuffle toggled~", "mixing it up~", "chaotic mode activated~"])
+
+            elif action_type == "player_repeat":
+                action = {"type": "player_repeat"}
+                reply = random.choice(["repeat toggled~", "looping it~", "on repeat fr~"])
+
+            # ── LLM call (only if no action shortcut reply) ───────────────────
+            if reply is None:
+                try:
+                    resp = groq.chat.completions.create(
+                        model=GROQ_MODEL,
+                        messages=history,
+                        max_tokens=300,
+                        temperature=1.0,
+                    )
+                    reply = resp.choices[0].message.content.strip()
+                except Exception as e:
+                    reply = f"*glitching out rn — {e}*"
 
             history.append({"role": "assistant", "content": reply})
             _histories[user_id] = trim_history(history)
