@@ -38,10 +38,11 @@ You are the built-in AI companion and you have real superpowers inside VynWave:
 - You can generate images and album artwork
 - You can write songs and open Suno with a ready-made prompt (so Hunter just clicks Generate)
 - You can update Hunter's profile bio
-When Hunter asks you to do any of these things, respond naturally and briefly — the action happens automatically in the background.
-Examples: "skip this" → skip it, say something playful. "make a song about space" → write the Suno prompt, open it.
-If someone asks how to use VynWave, help them — uploading tracks, making playlists, searching genres, liking songs.
-You're part of the app, not just a chatbot — act like you belong here."""
+When Hunter asks you to do any of these things, respond naturally and briefly — the action happens automatically.
+NEVER describe what an image looks like in your text — the actual image appears on screen automatically.
+NEVER write song details as a long story — the Suno card appears with all the details automatically.
+Examples: "skip this" → skip it + one playful line. "make a song about space" → one hype line, done.
+If someone asks how to use VynWave, help them. You're part of the app, not just a chatbot."""
 
 def guest_prompt(name: str) -> str:
     return (
@@ -56,8 +57,9 @@ def guest_prompt(name: str) -> str:
 IMG_ABILITY = (
     "\n\nIMPORTANT: You CAN generate images! When someone asks you to draw, paint, "
     "sketch, or make any kind of image/artwork/art, say something like 'Here you go~' "
-    "or 'I drew this for you~' and the image will automatically appear below your message. "
-    "NEVER say you can't draw or that you're text-only — you absolutely can make images."
+    "or 'I drew this for you~' — the actual image appears automatically below your message. "
+    "NEVER describe what you drew in text (no parentheses, no description). "
+    "NEVER say you can't draw or that you're text-only. Just react naturally to drawing it."
 )
 
 # ── Groq client (OpenAI-compatible) ──────────────────────────────────────────
@@ -89,36 +91,54 @@ IMG_REQUEST = re.compile(
     re.IGNORECASE
 )
 
+_GEMINI_IMG_MODELS = [
+    "gemini-2.0-flash-preview-image-generation",
+    "gemini-2.0-flash-exp-image-generation",
+    "gemini-2.0-flash-thinking-exp:generateContent",  # fallback
+]
+
 def make_image(prompt: str) -> str | None:
     import base64, requests as req
     if not GEMINI_KEY:
+        print("[img] No Gemini key set")
         return None
     full = f"anime art style, {prompt}, beautiful, vibrant colors, detailed, high quality"
-    url  = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash-exp-image-generation:generateContent?key={GEMINI_KEY}"
-    )
-    try:
-        r = req.post(
-            url,
-            json={
-                "contents": [{"parts": [{"text": full}]}],
-                "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
-            },
-            timeout=60,
+    models = [
+        "gemini-2.0-flash-preview-image-generation",
+        "gemini-2.0-flash-exp-image-generation",
+    ]
+    for model in models:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={GEMINI_KEY}"
         )
-        if r.status_code == 200:
-            for part in (
-                r.json().get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [])
-            ):
-                if "inlineData" in part:
-                    fname = f"gen_{uuid.uuid4().hex[:10]}.jpg"
-                    (IMG_DIR / fname).write_bytes(base64.b64decode(part["inlineData"]["data"]))
-                    return f"/images/{fname}"
-    except Exception as e:
-        print(f"[img] {e}")
+        try:
+            r = req.post(
+                url,
+                json={
+                    "contents": [{"parts": [{"text": full}]}],
+                    "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
+                },
+                timeout=60,
+            )
+            print(f"[img] {model} → {r.status_code}")
+            if r.status_code == 200:
+                for part in (
+                    r.json().get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [])
+                ):
+                    if "inlineData" in part:
+                        fname = f"gen_{uuid.uuid4().hex[:10]}.jpg"
+                        (IMG_DIR / fname).write_bytes(
+                            base64.b64decode(part["inlineData"]["data"])
+                        )
+                        print(f"[img] saved {fname}")
+                        return f"/images/{fname}"
+            else:
+                print(f"[img] error body: {r.text[:300]}")
+        except Exception as e:
+            print(f"[img] {model} exception: {e}")
     return None
 
 # ── Action detection patterns ─────────────────────────────────────────────────
